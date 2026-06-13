@@ -25,9 +25,8 @@
   }
   .ctrl-row {
     display: flex; align-items: center; gap: 10px;
-    margin-bottom: 12px; flex-wrap: wrap; justify-content: center;
+    margin-bottom: 28px; flex-wrap: wrap; justify-content: center;
   }
-  .ctrl-row:last-of-type { margin-bottom: 28px; }
   .ctrl-row button {
     background: rgba(255,255,255,0.06);
     border: 1px solid rgba(255,255,255,0.1);
@@ -53,10 +52,10 @@
   .emoji-layer {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
+    font-size: 120px; line-height: 1;
     filter: drop-shadow(0 0 20px rgba(120,140,255,0.3));
     transition: opacity 0.25s ease;
   }
-  .emoji-layer img { width: 140px; height: 140px; image-rendering: auto; }
   .emoji-layer.hidden { opacity: 0; }
   .center-dot {
     position: absolute; top: 50%; left: 50%;
@@ -157,8 +156,8 @@
 
 <div class="emoji-stage">
   <div class="glow-ring"></div>
-  <div class="emoji-layer" id="emoji-a"><img></div>
-  <div class="emoji-layer hidden" id="emoji-b"><img></div>
+  <div class="emoji-layer" id="emoji-a"></div>
+  <div class="emoji-layer hidden" id="emoji-b"></div>
   <div class="center-dot"></div>
 </div>
 <div id="emoji-label"></div>
@@ -188,7 +187,7 @@
 <div class="grid" id="emoji-grid"></div>
 
 <div class="footer">
-  Pre-renders each emoji to a bitmap, measures the clock-face center, and rotates around that exact point with crossfade transitions.
+  Finds the clock emoji with the closest hand angle, then rotates it to show the current time. Tap the clock to toggle the center dot.
 </div>
 
 <script>
@@ -214,18 +213,23 @@ const angDist = (a,b) => { const d=((a-b)%360+360)%360; return Math.min(d,360-d)
 const fmt = (d) => d.toFixed(1)+"\u00B0";
 const fmtTime = (h,m) => h+":"+(m===0?"00":"30");
 
-// ── Pre-render system emojis to bitmaps ──
-const emojiData = {};
+// ── Measure center offsets via canvas (one-time) ──
+// Renders each emoji to an offscreen canvas to find the bounding-box
+// center. Stores the offset from geometric center as a percentage of
+// font size. Used to translate each emoji so the clock face center
+// aligns with the stage center (the red dot).
+const emojiOffsets = {};
 
-function prerenderEmojis() {
+(function measureCenters() {
   const size = 400;
   const canvas = document.createElement('canvas');
   canvas.width = size; canvas.height = size;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const fs = size * 0.85;
 
   for (const [emoji] of CLOCKS) {
     ctx.clearRect(0, 0, size, size);
-    ctx.font = (size*0.85)+'px serif';
+    ctx.font = fs + 'px serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(emoji, size/2, size/2);
@@ -240,23 +244,15 @@ function prerenderEmojis() {
         }
       }
     }
-    const cx = (minX+maxX)/2, cy = (minY+maxY)/2;
-    const margin = 4;
-    const tl = Math.max(0, minX-margin), tt = Math.max(0, minY-margin);
-    const tw = Math.min(size, maxX+margin+1)-tl;
-    const th = Math.min(size, maxY+margin+1)-tt;
-    const trimmed = document.createElement('canvas');
-    trimmed.width = tw; trimmed.height = th;
-    trimmed.getContext('2d').drawImage(canvas, tl, tt, tw, th, 0, 0, tw, th);
-    emojiData[emoji] = {
-      dataUrl: trimmed.toDataURL('image/png'),
-      originX: ((cx-tl)/tw)*100,
-      originY: ((cy-tt)/th)*100
+    // Offset of bbox center from canvas center, normalized to font size
+    const bboxCx = (minX + maxX) / 2;
+    const bboxCy = (minY + maxY) / 2;
+    emojiOffsets[emoji] = {
+      dx: (bboxCx - size/2) / fs,
+      dy: (bboxCy - size/2) / fs
     };
   }
-}
-
-prerenderEmojis();
+})();
 
 // ── Sort & grid ──
 const sorted = CLOCKS.map(([emoji,h,m]) => ({
@@ -300,23 +296,19 @@ document.querySelector('.emoji-stage').addEventListener('click', () => {
 // ── Crossfade state ──
 const layerA = document.getElementById("emoji-a");
 const layerB = document.getElementById("emoji-b");
-const imgA = layerA.querySelector("img");
-const imgB = layerB.querySelector("img");
-let activeFrontLayer = layerA, activeBackLayer = layerB;
-let activeFrontImg = imgA, activeBackImg = imgB;
+let activeFront = layerA, activeBack = layerB;
 let currentEmoji = null;
 
-function setLayerEmoji(img, emoji, angleDeg) {
-  const d = emojiData[emoji];
-  if (!d) return;
-  if (img.dataset.ek !== emoji) {
-    img.src = d.dataUrl;
-    img.dataset.ek = emoji;
-  }
-  img.style.transformOrigin = d.originX.toFixed(2)+'% '+d.originY.toFixed(2)+'%';
-  const tx = (50 - d.originX).toFixed(2);
-  const ty = (50 - d.originY).toFixed(2);
-  img.style.transform = 'translate('+tx+'%, '+ty+'%) rotate('+angleDeg.toFixed(2)+'deg)';
+// Display size matches CSS font-size
+const DISPLAY_SIZE = 120;
+
+function setLayer(el, emoji, angleDeg) {
+  el.textContent = emoji;
+  const o = emojiOffsets[emoji] || { dx: 0, dy: 0 };
+  // Translate to align bbox center with stage center, then rotate
+  const tx = (-o.dx * DISPLAY_SIZE).toFixed(1);
+  const ty = (-o.dy * DISPLAY_SIZE).toFixed(1);
+  el.style.transform = 'translate('+tx+'px,'+ty+'px) rotate('+angleDeg.toFixed(2)+'deg)';
 }
 
 function tick() {
@@ -345,22 +337,21 @@ function tick() {
   const rotDur = Math.max(0.02, 0.3 / speed);
 
   if (emojiChanged) {
-    activeBackImg.style.transition = 'none';
-    setLayerEmoji(activeBackImg, best.emoji, bestRot);
-    activeBackLayer.offsetHeight;
-    activeBackLayer.style.transition = 'opacity '+fadeDur+'s ease';
-    activeFrontLayer.style.transition = 'opacity '+fadeDur+'s ease';
-    activeBackLayer.classList.remove('hidden');
-    activeFrontLayer.classList.add('hidden');
-    const tmpL = activeFrontLayer, tmpI = activeFrontImg;
-    activeFrontLayer = activeBackLayer;
-    activeFrontImg = activeBackImg;
-    activeBackLayer = tmpL;
-    activeBackImg = tmpI;
+    // Set back layer instantly, then crossfade
+    activeBack.style.transition = 'none';
+    setLayer(activeBack, best.emoji, bestRot);
+    activeBack.offsetHeight;
+    activeBack.style.transition = 'opacity '+fadeDur+'s ease';
+    activeFront.style.transition = 'opacity '+fadeDur+'s ease';
+    activeBack.classList.remove('hidden');
+    activeFront.classList.add('hidden');
+    const tmp = activeFront;
+    activeFront = activeBack;
+    activeBack = tmp;
     currentEmoji = best.emoji;
   } else {
-    activeFrontImg.style.transition = 'transform '+rotDur+'s cubic-bezier(0.34,1.4,0.64,1)';
-    setLayerEmoji(activeFrontImg, best.emoji, bestRot);
+    activeFront.style.transition = 'transform '+rotDur+'s cubic-bezier(0.34,1.4,0.64,1)';
+    setLayer(activeFront, best.emoji, bestRot);
   }
 
   document.getElementById("emoji-label").innerHTML =
